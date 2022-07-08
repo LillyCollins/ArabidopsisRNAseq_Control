@@ -1,0 +1,276 @@
+---
+title: "go_Cont"
+author: "Ying"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r package loading}
+library(tidyverse)
+library(magrittr)
+library(biomaRt)
+library(parallel) # mclapply
+library(GO.db) # Term() function
+library(annotate)
+library(scales)
+library(pheatmap)
+library(here) # extract R objects (DEGsCont)
+library(dendextend) # to plot a simple dendrogram
+
+
+## for Mac only
+nCores <- min(detectCores() - 1, 12)
+# nCores = 1 # for windows set to 1
+
+```
+
+```{r download gene with go info and gene info from ensembl biomart}
+# To choose BioMart database and construct info needed
+listMarts(host = "plants.ensembl.org")
+m <- useMart("plants_mart", dataset = "athaliana_eg_gene", host = "plants.ensembl.org")
+
+listDatasets(m) # check plants info version
+listAttributes(m) # choose data types you want to download
+
+go <- getBM(attributes = c("ensembl_gene_id", "go_id"), mart = m) %>% 
+  set_colnames(c("GeneID", "GO_terms")) 
+
+# extract information from biomart for gene name, gene id and description
+geneInfo<-
+  getBM(attributes=c("ensembl_gene_id","external_gene_name","description"),
+        mart = m) %>%
+  set_colnames(c("GeneID", "GeneName", "GeneDescrip"))  %>% 
+  mutate(GeneDescrip = str_extract(.$GeneDescrip, ".+(?=\\[)"))
+
+```
+
+```{r collect GO terms for each gene}
+# attache go terms to each gene
+gene2GO <- go %>%
+  filter(!is.na(GO_terms) & GO_terms != "") %>%  
+  distinct(GeneID, GO_terms) %>%  # subset unique rows, no changes
+  split(f = .$GeneID) %>% 
+  # GeneID is element name, collecting all the GO terms related to that GeneID
+  mclapply(function(x){   # x: each one of the 26481 elements in the list
+    unique(x$GO_terms)    
+  }, 
+  mc.cores = 1) # mc.cores must be exactly 1 on windows
+
+# remove any without GO terms
+gene2GO <- gene2GO[vapply(gene2GO, length, numeric(1)) > 0]  
+
+```
+
+```{r build GO tree}
+# Collect all the ancestor terms for each GO term
+goAncestors <- 
+  c(as.list(GOBPANCESTOR),
+    as.list(GOCCANCESTOR),
+    as.list(GOMFANCESTOR)
+)
+
+# Define root nodes
+rootGO <- list(
+  BP = "GO:0008150",
+  CC = "GO:0005575",
+  MF = "GO:0003674"
+)
+
+# Expand so each gene now has all parent terms correctly assigned
+gene2GO %<>% mclapply(function(x){  # x is GeneID-named go terms
+  # expand each go term along back to "all" node (Level 0)
+  # but start with 1 step upper level (i.e. not including itself)
+  unlist(goAncestors[x]) %>% 
+    unique() %>%  # removed repeated ancestor GO terms
+    c(x) %>% # add the original GO terms (i.e. itself) for each of the 26411 gene2GO lists of GO terms
+    setdiff(unlist(rootGO)) %>%  # remove the very Level 1 and Level 0 but give free level 
+    setdiff("all") %>%           # to choose with additional info in goSummaries
+    unique()
+}, mc.cores = 1) # nCors =1 on windows
+
+# remove any with no GO terms
+gene2GO <- gene2GO[vapply(gene2GO, length, numeric(1)) > 0] 
+
+goSummaries <- 
+  url("https://uofabioinformaticshub.github.io/summaries2GO/data/goSummaries.RDS") %>%
+  readRDS()
+```
+
+```{r DEgene to collect go}
+#---------input DE gene----------#
+DEGs <- readRDS(here("_R", "DEGsCont.rds"))
+
+# check how many DE genes have GO terms
+DEGs %>% 
+  lapply(function(de){
+    dplyr::tibble(
+      n.de = length(de$GeneID),
+      n.deWithGO = intersect(de$GeneID, names(gene2GO)) %>% length()
+        )
+  }) # %>% bind_rows()
+
+### GO enrichment results
+goRes <- DEGs %>%  
+  lapply(function(x){   # x: 6 MutantVsWt comparisions
+    x %>% 
+      split(f = .$Expr) %>% 
+      lapply(function(y){   # y: Expr Up or Down
+        DEgenes <- y$GeneID %>% 
+          intersect(names(gene2GO)) # remove DEgenes that have no GO terms
+        deGenes2GO <- gene2GO[DEgenes]
+        notDEGenes2GO <- gene2GO[setdiff(names(gene2GO), DEgenes)]
+        # genome-wide protein coding gene except genes in the DEgenes as background
+        nDE <- length(deGenes2GO) # DE genes that has GO terms
+        nNotDE <- length(notDEGenes2GO)
+        
+        NotdeGO <- unlist(notDEGenes2GO) %>% 
+          table %>%  
+          as.data.frame() %>% 
+          set_names(c("GO_term", "notDECount"))
+        
+        deGO <- unlist(deGenes2GO) %>% 
+          table() %>% 
+          as.data.frame() %>% 
+          set_names(c("GO_term", "DECount")) %>% 
+          left_join(NotdeGO, by = "GO_term") %>% 
+          as_tibble() %>% 
+          filter(DECount > 1) %>%  # only conside go terms with >=2 DEgenes
+          mutate(notDECount = ifelse(is.na(notDECount), 0 , notDECount)) %>% 
+          # remove NAs in notDECount cells after left_join
+          arrange(GO_term) %>% 
+          droplevels()
+        
+        deGO %>% 
+          split(f = .$GO_term) %>% 
+          lapply(function(df){
+            mat <- matrix(c(df$DECount[1], df$notDECount[1],
+                            nDE - df$DECount[1], nNotDE - df$notDECount),
+                          nrow = 2) %>% 
+              set_colnames(c("Genes with GO term", "Genes without GO term")) %>% 
+              set_rownames(c("Genes of interest", "Control genes"))
+            ft <- fisher.test(mat)
+            mutate(df,
+                   N = sum(mat[, "Genes with GO term"]),
+                   Expect = nDE * df$notDECount[1] / nNotDE,
+                   p = ft$p.value)
+          }) %>% 
+          bind_rows() %>% 
+          dplyr::mutate(adjP =p.adjust(p, "bonferroni"),
+                 FDR = p.adjust(p, "fdr"),
+                 Descrip = Term(as.character(GO_term)),
+                 Expr = unique(y$Expr)) %>% 
+          arrange(p) %>% 
+          left_join(goSummaries, by = c("GO_term" = "id")) %>% 
+          filter(DECount > Expect) %>% # because fisher.test is two-sided
+          dplyr::select(GO_term, Descrip, DECount, Expect, N, everything())
+      }) %>% 
+      bind_rows()
+  })
+
+```
+
+```{r modify go results for different input goRes lists}
+goRes_filtered <- names(DEGs) %>%  
+  lapply(function(x){     # x is each one of the 6 MutantVsWt comparisons
+    goRes[[x]] %>% 
+      mutate(Group = x) %>% 
+      dplyr::select(-notDECount) %>% 
+      filter(adjP < 0.05 & shortest_path >= 4) 
+      # i modified the codes, filtered within the loop
+  }) %>% 
+  bind_rows() %>% 
+  split(.$Expr) %>%     # split into up and down two sub-lists
+  lapply(function(x){
+    x %>% 
+      group_by(GO_term)
+  })
+
+
+```
+
+```{r heatmaps for goRes_filtered}
+# up- or down- regulated genes GO heatmap ################################
+dfup <-
+  goRes_filtered$Up %>% 
+  dplyr::select("GO_term", "Descrip", "p", "adjP", "ontology", "Group") %>%  
+  # subset needed data
+  # get -log10(p) values, re-assign -LogP to 0 for adjP>= 0.05
+  dplyr::mutate("-LogP" = ifelse(adjP < 0.05, -log10(p), 0),
+                .keep = "unused") %>% 
+  rstatix::reorder_levels("Group", order = unique(.$Group)) %>% 
+  reshape2::dcast(GO_term + Descrip + ontology ~ Group,
+                  value.var = '-LogP')  %>% 
+  unite(col = "GO", sep = " ", c(GO_term, Descrip)) %>% 
+  column_to_rownames(var = "GO") %>% 
+  # re-assign NA to 0
+  dplyr::mutate_all(~replace(., is.na(.), 0))
+
+dfdown <- 
+  goRes_filtered$Down[c(1,2, 6, 7, 13, 14)] %>%  # subset needed data
+  # get -log10(p) values, re-assign -LogP to 0 for adjP>= 0.05
+  dplyr::mutate("-LogP" = ifelse(adjP < 0.05, -log10(p), 0), 
+                .keep = "unused") %>% 
+  rstatix::reorder_levels("Group", order = unique(.$Group)) %>% 
+  reshape2::dcast(GO_term + Descrip + ontology ~ Group)  %>% 
+  unite(col = "GO", sep = " ", c(GO_term, Descrip)) %>% 
+  column_to_rownames(var = "GO") %>% 
+  # re-assign NA to 0
+  dplyr::mutate_all(~replace(., is.na(.), 0))
+
+### create annotations ---------------------------------------------------#
+dfup_annos <- dfup %>% dplyr::select(ontology)
+dfdown_annos <- dfdown %>% dplyr::select(ontology)
+
+# # change row name of GO:0016709 cause it is too long
+GO0016709 <- "GO:0016709 oxidoreductase activity, acting on paired donors, with incorporation or reduction of molecular oxygen, NAD(P)H as one donor, and incorporation of one atom of oxygen"
+rownames(dfdown)[rownames(dfdown) == GO0016709] <- "GO:0016709 oxidoreductase activity, acting on paired donors"
+
+# GO heatmap for Up-regulated DEGs
+p_dfup <-
+  dfup %>% dplyr::select(-ontology) %>% 
+  pheatmap(color = colorRampPalette(c("white", "red"))(50), 
+           breaks = c(seq(0,max(.[,-1]),length.out = 51)),
+           annotation_row = dfup_annos,
+           cluster_cols = FALSE,
+           fontsize =10,
+           angle_col = 0,
+           cellwidth = 40, cellheight = 13
+           )
+
+# GO heatmap for Down-regulated DEGs
+p_dfdown <-
+  dfdown %>% dplyr::select(-ontology) %>% 
+  pheatmap(color = c(colorRampPalette(c("white", "blue"))(80), rep("#0000FF",10)),
+           angle_col = 0,
+           annotation_row = dfdown_annos,
+           cluster_cols = FALSE, show_rownames = FALSE
+           )
+
+```
+
+```{r collect genes for each GO term}
+# find the go term related genes (including direct genes, and its child term related genes)
+# for future check
+go2GENE <- lapply(names(gene2GO), function(x){  # x is names of gene2GO, i.e. GeneID
+  tibble(GeneID = x,
+         GO = gene2GO[x] %>% unlist())
+}) %>% bind_rows() %>% 
+  distinct(GeneID,GO) %>%
+  split(f = .$GO) %>%
+  lapply(function(x){   
+    # x: gene list related to that GO term (i.e. name of that list, the "GO term")
+    x[["GeneID"]]
+  }) 
+
+```
+
+```{r Save go2GENE for GO enrichment analysis}
+
+go2GENE %>% saveRDS(file.path("_R", "go2GENE.rds"))
+
+```
