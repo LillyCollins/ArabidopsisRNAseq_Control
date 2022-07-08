@@ -15,7 +15,6 @@ library(tidyverse)
 library(magrittr)
 library(edgeR)
 library(ComplexHeatmap) # for UpSet Plot
-library(here)
 
 ```
 
@@ -157,6 +156,7 @@ lapply(names(DEGs), function(g){  # g: genotype_WT, the comparison
 ```
 
 ```{r DEGs for go analysis}
+
 # Significant genes in DEGs to do the next enrichment analysis
 genes2go <- lapply(names(DEGs), function(g){  # g: each genotype of mutant VS WT
   DEGs[[g]] %>% 
@@ -243,13 +243,10 @@ decorate_annotation("DEGs Intersections", {
 })
 ```
 
-```{r Save DEGs results for GO and KEGG analysis}
-r.dir <- here("_R")
-ifelse(!dir.exists(r.dir),
-       dir.create(r.dir),
-       FALSE)
 
-genes2go %>% saveRDS(file.path(r.dir, "DEGsCont.rds"))
+```{r Save DEGs results for GO and KEGG analysis}
+
+genes2go %>% saveRDS(file.path("_R", "DEGsCont.rds"))
 
 
 

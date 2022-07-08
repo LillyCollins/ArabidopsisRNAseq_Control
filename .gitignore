@@ -3,4 +3,5 @@
 .RData
 .Ruserdata
 *.Rproj
-Ying_Submergence_batch1_final.txt
+*.txt
+
