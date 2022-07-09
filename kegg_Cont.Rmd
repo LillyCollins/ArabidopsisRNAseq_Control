@@ -1,9 +1,5 @@
 ---
-<<<<<<< HEAD
 title: "KEGG pathway analysis of control plants"
-=======
-title: "KEGG analysis of control plants"
->>>>>>> bfa91c456fd694b1f5efd5843366308ff9a3262b
 author: "Ying"
 output: html_document
 editor_options: 
