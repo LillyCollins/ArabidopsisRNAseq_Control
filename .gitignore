@@ -4,4 +4,4 @@
 .Ruserdata
 *.Rproj
 *.txt
-
+.DS_Store

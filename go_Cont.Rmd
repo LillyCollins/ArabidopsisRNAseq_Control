@@ -1,5 +1,5 @@
 ---
-title: "go_Cont"
+title: "GO enrichment analysis of control plants"
 author: "Ying"
 output: html_document
 editor_options: 
@@ -56,7 +56,7 @@ gene2GO <- go %>%
   distinct(GeneID, GO_terms) %>%  # subset unique rows, no changes
   split(f = .$GeneID) %>% 
   # GeneID is element name, collecting all the GO terms related to that GeneID
-  mclapply(function(x){   # x: each one of the 26481 elements in the list
+  mclapply(function(x){   # x: each one of the 26408 elements in the list
     unique(x$GO_terms)    
   }, 
   mc.cores = 1) # mc.cores must be exactly 1 on windows
@@ -101,7 +101,7 @@ goSummaries <-
   readRDS()
 ```
 
-```{r DEgene to collect go}
+```{r GO enrichment analysis}
 #---------input DE gene----------#
 DEGs <- readRDS(here("_R", "DEGsCont.rds"))
 
@@ -172,31 +172,25 @@ goRes <- DEGs %>%
       bind_rows()
   })
 
-```
 
-```{r modify go results for different input goRes lists}
-goRes_filtered <- names(DEGs) %>%  
+goRes <- names(goRes) %>%  
   lapply(function(x){     # x is each one of the 6 MutantVsWt comparisons
     goRes[[x]] %>% 
       mutate(Group = x) %>% 
-      dplyr::select(-notDECount) %>% 
-      filter(adjP < 0.05 & shortest_path >= 4) 
-      # i modified the codes, filtered within the loop
+      dplyr::select(-notDECount)
   }) %>% 
   bind_rows() %>% 
-  split(.$Expr) %>%     # split into up and down two sub-lists
-  lapply(function(x){
-    x %>% 
-      group_by(GO_term)
-  })
+  split(.$Expr)
 
+write_csv(goRes[["Up"]], "/_Results/GoUpResults.csv")
+write_csv(goRes[["Down"]], "/_Results/GoDownResults.csv")
 
 ```
 
 ```{r heatmaps for goRes_filtered}
 # up- or down- regulated genes GO heatmap ################################
 dfup <-
-  goRes_filtered$Up %>% 
+  goRes$Up %>% filter(adjP < 0.05 & shortest_path >= 4) %>% 
   dplyr::select("GO_term", "Descrip", "p", "adjP", "ontology", "Group") %>%  
   # subset needed data
   # get -log10(p) values, re-assign -LogP to 0 for adjP>= 0.05
@@ -211,7 +205,8 @@ dfup <-
   dplyr::mutate_all(~replace(., is.na(.), 0))
 
 dfdown <- 
-  goRes_filtered$Down[c(1,2, 6, 7, 13, 14)] %>%  # subset needed data
+  goRes$Down %>% filter(adjP < 0.05 & shortest_path >= 4) %>% 
+  dplyr::select("GO_term", "Descrip", "p", "adjP", "ontology", "Group") %>%    # subset needed data
   # get -log10(p) values, re-assign -LogP to 0 for adjP>= 0.05
   dplyr::mutate("-LogP" = ifelse(adjP < 0.05, -log10(p), 0), 
                 .keep = "unused") %>% 
@@ -269,8 +264,10 @@ go2GENE <- lapply(names(gene2GO), function(x){  # x is names of gene2GO, i.e. Ge
 
 ```
 
-```{r Save go2GENE for GO enrichment analysis}
+```{r Save go2GENE, gene2GO, geneInfo for futher use}
 
 go2GENE %>% saveRDS(file.path("_R", "go2GENE.rds"))
+gene2GO %>% saveRDS(file.path("_R", "gene2GO.rds"))
+geneInfo %>% saveRDS(file.path("_R", "geneInfo.rds"))
 
 ```

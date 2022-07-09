@@ -128,8 +128,6 @@ DEGs <- lapply(colnames(myContrasts), function(c){
 names(DEGs) <- colnames(myContrasts)
 
 # volcano plot (facetwrap 3 by 2) and DEGs in colour
-mutants <- c("gad1CS","gad1SALK","gad2-1", "gad1245","gad2OE_B33","pop2-8")
-
 lapply(names(DEGs), function(g){  # g: genotype_WT, the comparison
   DEGs[[g]] %>% dplyr::select(logFC, adj.p, MutantVsWt) %>% 
     mutate(Expr = ifelse(adj.p < 0.05 & abs(logFC) >=1, 
@@ -225,12 +223,7 @@ UpSet(m,
                        width = unit(3, "cm")),
         annotation_name_side = "top",
         annotation_name_rot = 0
-        # set_name = anno_text(set_name(m), 
-        #                      location = 1,
-        #                      just = "right", height = 2,
-        #                      width = max_text_width(set_name(m)) + unit(0.5, "mm"))
         ),
-      # right_annotation = NULL,
       row_names_side = "left", 
       show_row_names = TRUE,
       row_names_gp = grid::gpar(fontsize = 10))
@@ -245,10 +238,7 @@ decorate_annotation("DEGs Intersections", {
 
 
 ```{r Save DEGs results for GO and KEGG analysis}
-
 genes2go %>% saveRDS(file.path("_R", "DEGsCont.rds"))
-
-
 
 ```
 
