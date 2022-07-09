@@ -1,0 +1,281 @@
+---
+title: "KEGG analysis of control plants"
+author: "Ying"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+library(KEGGREST)  # dont need to load after keggRes
+library(tidyverse)
+library(magrittr)
+library(pathview)
+library(here)
+options(digits = 3) # for mat the general options for printing digits in RStudio
+```
+
+```{r Get all arabadopsis pathways and their genes, and vice verse}
+# base on info from 'https://ucdavis-bioinformatics-training.github.io/2018-June-RNA-Seq-Workshop/friday/enrichment.html'
+
+# pull all pathways for Arabidopsis
+pathway.list <- keggList(database = "pathway", organism = "ath")
+head(pathway.list)
+
+# Pull all genes for each pathway
+pathway.codes <- sub(pattern = "path:", replacement = "", x = names(pathway.list))
+kegg2GENE <- sapply(pathway.codes, 
+    function(pwid){
+      pw <- keggGet(pwid)
+      if (is.null(pw[[1]]$GENE)) return(NA)
+      pw2 <- pw[[1]]$GENE[c(TRUE, FALSE)] # may need to modify to c(FALSE, TRUE) for other organisms
+      pw2 <- unlist(lapply(strsplit(pw2, split = ";", fixed = TRUE), 
+                           function(x)x[1]))
+      return(pw2)
+      }
+    ) 
+head(kegg2GENE)
+
+# Pull all pathways for each gene
+gene2KEGG <- lapply(names(kegg2GENE), 
+    function(x){  # x is code of every pathway
+      tibble(keggID = x, 
+             GeneID = kegg2GENE[x] %>% unlist())
+}) %>% 
+  bind_rows() %>% 
+  distinct(GeneID, keggID) %>% 
+  split(f = .$GeneID) %>% 
+  lapply(function(x){ # x: name of that list, the "GeneID"
+    x[["keggID"]]
+  })  
+
+# KEGG summaries (including KEGG class information)
+keggDescription <- tibble(
+  keggID = str_remove(names(pathway.list), pattern = "path:"),
+  Description = str_remove(pathway.list, pattern = " - Arabidopsis thaliana \\(thale cress\\)"))
+
+keggSummaries <- 
+  sapply(keggDescription$keggID, function(pwid){
+    pw <- keggGet(pwid)
+    if (is.null(pw[[1]]$CLASS)) return(NA)
+    keggClass <- pw[[1]]$CLASS[c(TRUE, FALSE)]
+  }) %>%
+  as.data.frame() %>% 
+  set_colnames("Class") %>% rownames_to_column("keggID") %>% 
+  left_join(keggDescription)
+```
+
+```{r KEGG pathways analysis}
+# attach DEGsCont
+DEGsCont <- read_rds(here("_R", "DEGsCont.rds"))
+mutants <- c("gad1*","gad1KO","gad2-1","gad1245","gad2OE","pop2-8")
+names(DEGsCont) <- mutants
+
+# check how many DE genes have KEGG pathway info
+DEGsCont %>%
+  lapply(function(de){
+    tibble(n.de = length(de$GeneID),
+           n.deWithKEGG = intersect(de$GeneID, names(gene2KEGG)) %>% length())
+  }) # gad1* 211/915, gad1KO 264/1245, gad2-1 375/1571, gad1245 400/1723, gad2OE 308/1451, pop2-8 400/2133
+
+# KEGG pathway analysis results
+keggRes <- DEGsCont %>%
+  lapply(function(x){  # x: 6 MutantVsWt comparisions
+    
+    DEgenes <- x$GeneID %>% 
+      intersect(names(gene2KEGG)) # remove DE genes that have no pathways
+    
+    deGenes2kegg <- gene2KEGG[DEgenes] # DE genes and corresponding KEGG
+    notDEGenes2kegg <- gene2KEGG[setdiff(names(gene2KEGG), DEgenes)]
+    # genome-wide protein coding gene except genes in the DEgenes as background
+    nDE <- length(deGenes2kegg)
+    nNotDE <- length(notDEGenes2kegg)
+    
+    NotdeKEGG <- unlist(notDEGenes2kegg) %>% 
+      table() %>% 
+      as.data.frame() %>% 
+      set_names(c("keggID", "notDECount"))
+    
+    deKEGG <- unlist(deGenes2kegg) %>% 
+      table() %>% 
+      as.data.frame() %>% 
+      set_names(c("keggID", "DECount")) %>% 
+      left_join(NotdeKEGG, by = "keggID") %>% # make sure to include all pathways from deKEGG
+      as_tibble() %>% 
+      filter(DECount > 1) %>%  # only consider pathways with >=2 DE genes
+      mutate(notDECount = ifelse(is.na(notDECount), 0, notDECount)) %>% # remove NAs in notDECount cells after left_join
+      arrange(keggID) %>% 
+      droplevels()
+    
+    deKEGG %>% 
+      split(f = .$keggID) %>% 
+      lapply(function(df){ # for a given pathway, calculating the following
+        minimat <- 
+          matrix(c(df$DECount[1],  # get the element in the first row of each column
+                   df$notDECount[1], nDE - df$DECount[1], nNotDE - df$notDECount), 
+                 nrow = 2) %>% 
+          set_colnames(c("Genes with KEGG","Genes without KEGG")) %>% 
+          set_rownames(c("DE genes", "Control genes"))
+        ft <- fisher.test(minimat)
+        mutate(df,
+               N = sum(minimat[, "Genes with KEGG"]),
+               Expect = nDE * df$notDECount[1] / nNotDE,
+               DEGsRatio =  paste0(DECount, "/", N), # No. of DEGs in that pathway
+               GeneRatio = paste0(DECount, "/", nDE), # No. of DE genes in that mutant
+               BgRatio = paste0(notDECount, "/", nNotDE),
+               p = ft$p.value,
+               adjP = p.adjust(p, "bonferroni"),
+               FDR = p.adjust(p, "fdr"))
+      }) %>% 
+      bind_rows() %>% 
+      arrange(p) %>% 
+      left_join(keggSummaries, by = "keggID") %>% 
+      filter(DECount > Expect) %>% # because fisher.test is two-sided %>% 
+      dplyr::select(keggID, DECount, Expect, N, everything())
+  })
+
+# write results to csv file
+keggRes <- names(keggRes) %>% 
+  lapply(function(x){   # x is each one of the 6 MutantVsWt comparisons
+    keggRes[[x]] %>% 
+      mutate(MutantVsWT = x)
+  }) %>% bind_rows() %>% as.data.frame()
+
+write_csv(keggRes, "_Results/keggResults.csv")
+
+```
+
+```{r significant KEGG pathways and heatmap}
+keggRes_filtered <- keggRes %>%  
+  filter(adjP < 0.05)
+  rstatix::reorder_levels("Group", order = names(keggRes) %>% unique())
+
+# heatmap
+keggRes4Heat <- keggRes_filtered %>% 
+  mutate("-LogP" = -log10(p), .keep = "unused") %>% 
+  reshape2::dcast(keggID + Description ~ Group, value.var = '-LogP') %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  column_to_rownames("keggID")
+
+Label <- paste(rownames(keggRes4Heat),keggRes4Heat$Description, sep = " ")
+names(Label) <- rownames(keggRes4Heat)
+
+p_KEGG <- keggRes4Heat %>% dplyr::select(-c(Description)) %>% 
+  # range() %>% # check range of -log10(p)
+  pheatmap::pheatmap(
+    color = colorRampPalette(c("white","#800080"))(99),
+    cluster_cols = FALSE,
+    labels_row = Label,
+    show_rownames = TRUE,
+    angle_col = 45,
+    fontsize = 8,    
+    cellwidth = 18, cellheight = 9,
+    )
+
+keggRes4Heat.ordered <- lapply(p_KEGG$tree_row$order, function(r){
+  keggRes4Heat[r,]}) %>% 
+  bind_rows() 
+
+keggRes4Heat.ordered %>% 
+  rownames_to_column("pid") %>% unite("PathwayInfo", c("pid", "Description"), sep = " ") %>%
+  column_to_rownames("PathwayInfo") %>% 
+  set_colnames(c("gad1*", "gad1KO", "gad2-1","gad1245","gad2OE", "pop2-8")) %>% 
+  pheatmap::pheatmap(
+    color = colorRampPalette(c("white","#800080"))(99),
+    cluster_cols = FALSE, cluster_rows = FALSE,
+    angle_col = 0,
+    fontsize = 8,   
+    cellwidth = 32, cellheight = 9
+    )
+```
+
+```{r Pathview}
+# check ID types supported by pathview
+ri <- korg[,"kegg.code"] == "ath"
+korg[ri,]
+
+# collect gene data (log2 fold change) of all 6 comparisons to Pathview 
+logFC <- DEGsCont %>% 
+  lapply(function(x){
+    x[c("GeneID", "MutantVsWt", "logFC")]
+  }) %>% bind_rows() %>%
+  reshape2::dcast(GeneID ~ MutantVsWt) %>% 
+  column_to_rownames("GeneID")
+# rename and re-order the columns 
+colnames(logFC) <- c("gad1245","gad1*","gad1KO","gad2-1","gad2OE","pop2-8")
+logFC <- logFC %>% dplyr::select(mutants)
+
+# path id, the 39 enriched pathway ID (i.e. keggID)
+path.ids <- rownames(keggRes4Heat)
+
+# check a specific pathway: e.g. Circadian rhythm ath04712
+mylogFC <- logFC[rownames(logFC) %in% kegg2GENE$ath04712,]
+range(mylogFC %>% mutate_all(~replace(., is.na(.), 0)))
+# check DEGs in that pathway 
+geneInfo <- read_rds(here("_R", "geneInfo.rds"))
+mylogFC %>% round(2) %>%  
+  rownames_to_column("GeneID") %>%
+  left_join(geneInfo) %>% 
+  mutate(Treat = "Cont", Note = "logFC") %>% 
+  arrange(GeneName) 
+
+# pathway visulisation
+pathview(gene.data = mylogFC, 
+         pathway.id = "ath04712", 
+         gene.idtype = "KEGG",
+         species = "ath",
+         kegg.native = TRUE, # default True, save to .png instead of .pdf
+         low = list(gene = "blue"),
+         mid = list(gene = "white"),
+         high = list(gene = "red"), 
+         na.col = "#bfffbf", # same as KEGG website green colour
+         # both.dirs = list(gene = FALSE), # default two directions
+         bins = list(gene = 30), # number of colours
+         limit = list(gene = 6),
+         res = 600,
+         cex=0.15
+         )
+
+#  hormone signal transduction ath04016
+mylogFC <- logFC[rownames(logFC) %in% kegg2GENE$ath04016,]
+range(mylogFC %>% mutate_all(~replace(., is.na(.), 0)))
+pathview(gene.data = mylogFC, 
+         pathway.id = "ath04016",
+         gene.idtype = "KEGG",
+         species = "ath",
+         kegg.native = TRUE, # default True, save to .png instead of .pdf
+         low = list(gene = "blue"),
+         mid = list(gene = "white"),
+         high = list(gene = "red"), 
+         na.col = "#bfffbf", # same as KEGG website green colour
+         bins = list(gene = 50), # number of colours
+         limit = list(gene = 10),
+         res = 600,
+         cex=0.15
+         )
+
+```
+
+
+```{r Save kegg2GENE, gene2KEGG for futher use}
+
+kegg2GENE %>% saveRDS(file.path("_R", "kegg2GENE.rds"))
+gene2KEGG %>% saveRDS(file.path("_R", "gene2KEGG.rds"))
+geneInfo %>% saveRDS(file.path("_R", "geneInfo.rds"))
+
+```
+
+
+
+
+
+
+
+
+
+
+
